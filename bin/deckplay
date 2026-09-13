@@ -95,7 +95,7 @@ def beep(rising=True):
     spoken replies come through fine - so the cue uses the exact same path
     that already works, and nothing clever.
     """
-    word = "слушаю" if rising else "принял"
+    word = "слушаю тебя" if rising else "принял, думаю"
     try:
         subprocess.run([os.path.join(HOME, ".local/bin/decksay"), word],
                        capture_output=True, timeout=20)
