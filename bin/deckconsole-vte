@@ -211,9 +211,21 @@ class Console(Gtk.Application):
         self.kb_on = on
 
     def keyboard_toggle(self, *_a):
-        self.keyboard(not self.kb_on)
-        if self.kb_on and self.term:
-            self.term.grab_focus()      # the request is what makes it appear
+        """Turn the keyboard on, and make the window ask for it again.
+
+        Setting KWin's mode back to 1 is not enough on its own: it shows the
+        keyboard when a window *starts* taking text input, and this window
+        started long ago - with the mode still 0, so the request went nowhere.
+        Dropping the focus and taking it back is that request, made again.
+        """
+        on = not self.kb_on
+        self.keyboard(on)
+        if not on or not self.term:
+            return
+        win = self.term.get_root()
+        if win:
+            win.set_focus(None)
+        GLib.timeout_add(150, lambda: (self.term.grab_focus(), False)[1])
 
     def run_tool(self, argv):
         """Fire off a helper script without blocking the interface."""
