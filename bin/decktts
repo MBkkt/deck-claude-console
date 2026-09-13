@@ -27,6 +27,13 @@ case "$1" in
     case "$cur" in on) next=auto ;; auto) next=off ;; *) next=on ;; esac
     echo "$next" > "$STATE/mode"; echo "speech: $next" ;;
   mode) cat "$STATE/mode" 2>/dev/null || echo auto ;;
+  show)                                   # short values, for button labels
+    . "$CONF"
+    case "$2" in
+      voice) echo "${RU_VOICE}" | sed -E 's/^[a-z]{2}_[A-Z]{2}-//; s/-(low|medium|high)$//' ;;
+      speed) echo "${SPEED:-1.0}" ;;
+      *)     echo "usage: decktts show voice|speed" ;;
+    esac ;;
   voices)
     for f in "$VOICES"/*.onnx; do
       [ -e "$f" ] || continue
@@ -34,6 +41,7 @@ case "$1" in
       case "$n" in ru_*|en_*) echo "$n" ;; esac
     done ;;
   voice)
+    if [ "$2" = "cycle" ]; then set -- voice next "${3:-ru}"; fi
     if [ "$2" = "next" ]; then                 # cycle the voice for one language
       . "$CONF"; lang=${3:-ru}
       cur=$([ "$lang" = ru ] && echo "$RU_VOICE" || echo "$EN_VOICE")
@@ -52,6 +60,13 @@ case "$1" in
     echo "voice: $2" ;;
   speed)
     [ -n "$2" ] || { echo "usage: decktts speed <0.5..2.0|+|->"; exit 1; }
+    if [ "$2" = "cycle" ]; then           # a ladder, not a slider
+      . "$CONF"
+      case "${SPEED:-1.0}" in
+        0.8) new=1.0 ;; 1.0) new=1.2 ;; 1.2) new=1.5 ;; 1.5) new=2.0 ;; *) new=0.8 ;;
+      esac
+      set_key SPEED "$new"; echo "speed: $new"; exit 0
+    fi
     if [ "$2" = "+" ] || [ "$2" = "-" ]; then
       . "$CONF"
       new=$(awk -v s="${SPEED:-1.0}" -v d="$2" \
