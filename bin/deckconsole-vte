@@ -77,26 +77,23 @@ PGUP  = CX + b"u"           # ctrl+x u -> page up
 PGDN  = CX + b"d"           # ctrl+x d -> page down
 LINE_UP   = CX + b"p"       # ctrl+x p -> one line up
 LINE_DOWN = CX + b"n"       # ctrl+x n -> one line down
-STASH = b"\x13"            # ctrl+s -> park the prompt (toggles back)
-PROMPT = "\u276f"           # the ❯ Claude draws in front of the input
-RECORDING_MARK = "\u2581"   # the ▁ meter shown while dictating
 
 COMMANDS = ["/model", "/resume", "/clear", "/compact", "/context",
             "/status", "/cost", "/memory", "/config", "/voice", "/help"]
 
-KEYS = [("Page up",    PGUP),
-        ("Page down",  PGDN),
-        ("Restore stash", STASH),
-        ("Enter",      b"\r"),
-        ("Esc",        ESC),
-        ("Complete",   b"\t"),
-        ("Del word",   b"\x17"),        # ctrl+w
-        ("Transcript", b"\x0f"),        # ctrl+o
-        ("Background", b"\x02"),        # ctrl+b
-        ("Undo",       b"\x1f"),        # ctrl+_
-        ("Mode",       ESC + b"[Z"),    # shift+tab
-        ("Interrupt",  b"\x03"),        # ctrl+c
-        ("Quit session", None)]          # ends tmux, not just this window
+#  Only keys with nowhere else to come from. Enter, Esc and the arrows are on
+#  the Deck's own A, B and d-pad, and "delete word" is a button in the bar - a
+#  menu entry for any of those is just a longer way to press them.
+KEYS = [("Page up",     PGUP),
+        ("Page down",   PGDN),
+        ("Complete",    b"\t"),
+        ("Transcript",  b"\x0f"),           # ctrl+o
+        ("Mode",        ESC + b"[Z"),       # shift+tab
+        ("Undo",        b"\x1f"),           # ctrl+_
+        ("Background",  b"\x02"),           # ctrl+b
+        ("Kill agents", CX + b"\x0b"),      # ctrl+x ctrl+k
+        ("Interrupt",   b"\x03"),           # ctrl+c
+        ("Quit session", None)]             # ends tmux, not just this window
 
 #  Speech settings, so they can be changed from the couch instead of asked for.
 #  Each runs `decktts`, which keeps the state in ~/.local/share/decktts/config.
