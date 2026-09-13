@@ -9,6 +9,12 @@
       }
     },
     {
+      "context": "Task",
+      "bindings": {
+        "meta+k": "voice:pushToTalk"
+      }
+    },
+    {
       "context": "Transcript",
       "bindings": {
         "ctrl+x p": "scroll:lineUp",
