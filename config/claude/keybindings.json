@@ -1,0 +1,30 @@
+{
+  "$schema": "https://www.schemastore.org/claude-code-keybindings.json",
+  "$docs": "https://code.claude.com/docs/en/keybindings",
+  "bindings": [
+    {
+      "context": "Chat",
+      "bindings": {
+        "meta+k": "voice:pushToTalk"
+      }
+    },
+    {
+      "context": "Transcript",
+      "bindings": {
+        "ctrl+x p": "scroll:lineUp",
+        "ctrl+x n": "scroll:lineDown",
+        "ctrl+x u": "scroll:fullPageUp",
+        "ctrl+x d": "scroll:fullPageDown"
+      }
+    },
+    {
+      "context": "Scroll",
+      "bindings": {
+        "ctrl+x p": "scroll:lineUp",
+        "ctrl+x n": "scroll:lineDown",
+        "ctrl+x u": "scroll:pageUp",
+        "ctrl+x d": "scroll:pageDown"
+      }
+    }
+  ]
+}

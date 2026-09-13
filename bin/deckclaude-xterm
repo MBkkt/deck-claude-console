@@ -1,0 +1,4 @@
+#!/bin/bash
+# The old xterm console, kept as an escape hatch.
+export PATH="$HOME/.local/bin:$PATH"
+exec "$HOME/.local/bin/deckconsole" "$@"

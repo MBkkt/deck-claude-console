@@ -1,0 +1,37 @@
+#!/bin/bash
+# Claude Code Stop hook: speak the last assistant reply.
+# Mode file decides when: auto (game mode only, default) | on | off
+STATE=$HOME/.local/share/decktts
+MODE=$(cat "$STATE/mode" 2>/dev/null || echo auto)
+case "$MODE" in
+  off) exit 0 ;;
+  auto) [ -n "$GAMESCOPE_WAYLAND_DISPLAY" ] || pgrep -f gamescope-session >/dev/null 2>&1 || exit 0 ;;
+esac
+
+payload=$(cat)
+printf '%s' "$payload" | python3 -c '
+import json,sys
+try:
+    tp = json.load(sys.stdin).get("transcript_path")
+except Exception:
+    sys.exit(0)
+if not tp: sys.exit(0)
+last = ""
+try:
+    with open(tp) as f:
+        for line in f:
+            try: e = json.loads(line)
+            except Exception: continue
+            if e.get("type") != "assistant": continue
+            c = (e.get("message") or {}).get("content")
+            if isinstance(c, list):
+                t = " ".join(b.get("text","") for b in c
+                             if isinstance(b, dict) and b.get("type") == "text")
+                if t.strip(): last = t
+            elif isinstance(c, str) and c.strip():
+                last = c
+except OSError:
+    sys.exit(0)
+sys.stdout.write(last)
+' | $HOME/.local/bin/decksay &
+exit 0

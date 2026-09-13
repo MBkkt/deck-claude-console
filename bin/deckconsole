@@ -1,0 +1,310 @@
+#!/usr/bin/python3
+"""Deck Console - one window: an embedded terminal plus a touch button bar.
+
+The Deck has no keyboard, so Claude Code's voice input, Tab-completion, Enter
+and the slash commands have to be reachable by touch. There is no VTE widget on
+SteamOS, so the terminal is a real xterm reparented into this window with
+`xterm -into`.
+
+  DECK_CONSOLE_CMD       what to run inside (default: the pinned Claude session)
+  DECK_CONSOLE_SESSION   session UUID to pin to - this also becomes the new
+                         stored pin, so it is how you re-point the console
+  DECK_CONSOLE_GEOMETRY  tk geometry, e.g. 640x772+640+28 for the right half.
+                         Handy for a test window next to the real console.
+"""
+import os, subprocess, tkinter as tk, uuid
+
+HOME    = os.path.expanduser("~")
+STATE   = os.path.join(HOME, ".local/state/deckconsole")
+PINFILE = os.path.join(STATE, "session-id")
+# Claude stores a directory's transcripts under a slugified copy of its path.
+PROJECT = os.path.join(HOME, ".claude/projects", "-" + HOME.strip("/").replace("/", "-"))
+
+def pinned_session():
+    """One stable session for the console.
+
+    `claude --continue` picks whichever transcript in the directory was written
+    to last, which on this box is just as likely to be a background session or
+    an empty forked stub - so the console used to come back to a stranger.
+    A pinned UUID always reopens the same conversation.
+    """
+    sid = os.environ.get("DECK_CONSOLE_SESSION", "")
+    if not sid:
+        try:
+            sid = open(PINFILE).read().strip()
+        except OSError:
+            sid = ""
+    if not sid:
+        sid = str(uuid.uuid4())
+    os.makedirs(STATE, exist_ok=True)
+    with open(PINFILE, "w") as fh:
+        fh.write(sid + "\n")
+    flag = "--resume" if os.path.exists(os.path.join(PROJECT, sid + ".jsonl")) \
+        else "--session-id"
+    return "cd %s && exec claude %s %s" % (HOME, flag, sid)
+
+CMD  = os.environ.get("DECK_CONSOLE_CMD") or pinned_session()
+BG   = "#0d1014"
+BAR  = "#161b22"
+
+for args in (["wpctl", "set-mute", "@DEFAULT_AUDIO_SOURCE@", "0"],
+             ["wpctl", "set-volume", "@DEFAULT_AUDIO_SOURCE@", "0.85"]):
+    subprocess.run(args, capture_output=True)
+
+GAME_MODE = bool(os.environ.get("GAMESCOPE_WAYLAND_DISPLAY")) or \
+    subprocess.run(["pgrep", "-f", "gamescope-session"], capture_output=True).returncode == 0
+
+root = tk.Tk()
+root.title("Claude Console")
+root.configure(bg=BG)
+root.geometry(os.environ.get("DECK_CONSOLE_GEOMETRY", "1280x800+0+0"))
+if GAME_MODE and not os.environ.get("DECK_CONSOLE_GEOMETRY"):
+    root.attributes("-fullscreen", True)
+
+term = tk.Frame(root, bg=BG, highlightthickness=0, bd=0)
+term.pack(side="top", fill="both", expand=True)
+
+bar = tk.Frame(root, bg=BAR, highlightthickness=0, bd=0)
+bar.pack(side="bottom", fill="x")
+
+xterm_wid = None
+term_proc = None
+
+def xdo(*args):
+    try:
+        return subprocess.run(["xdotool", *args], capture_output=True,
+                              text=True, timeout=5).stdout.strip()
+    except (subprocess.SubprocessError, OSError):
+        return ""
+
+def focus_term():
+    # The xterm is reparented into our frame, so it is not a top-level window:
+    # `windowactivate` silently does nothing for it and the keys land in
+    # whatever window the WM considers active. `windowfocus` reaches it.
+    if xterm_wid:
+        xdo("windowfocus", xterm_wid)
+
+def send(keys):
+    """Send one key, or a chord written as space-separated keys.
+
+    Claude Code's own shortcuts use `ctrl+x <letter>` chords, and its
+    keybindings file does not understand function-key names - so the buttons
+    below drive it with chords too.
+    """
+    focus_term()
+    for key in keys.split():
+        if xterm_wid:
+            xdo("key", "--window", xterm_wid, "--clearmodifiers", key)
+        else:
+            xdo("key", "--clearmodifiers", key)
+
+def type_text(text):
+    focus_term()
+    if xterm_wid:
+        xdo("type", "--window", xterm_wid, "--delay", "12", text)
+    else:
+        xdo("type", "--delay", "12", text)
+
+def run_command(cmd):
+    """Type a slash command and submit it.
+
+    The leading "/" has to arrive as a keystroke of its own, with a pause after
+    it: that is what opens Claude's command menu. Typed in one burst with the
+    rest of the word, the line is submitted as an ordinary message instead.
+    """
+    send("slash")
+    root.after(450,  lambda: type_text(cmd.lstrip("/")))
+    root.after(1300, lambda: send("Return"))
+
+def paste():
+    """Paste the clipboard through xterm itself.
+
+    Typing the clipboard out character by character looks tempting, but every
+    newline in it arrives as Enter and submits the half-pasted prompt. xterm's
+    own insert-selection sends the whole thing as one bracketed paste, which is
+    exactly what Claude expects - it shows up as a single pasted block.
+    Shift+Insert is wired to CLIPBOARD in the xterm translations below; if the
+    clipboard is empty we fall back to the primary selection (a plain drag).
+    """
+    try:
+        root.clipboard_get()
+    except tk.TclError:
+        send("shift+KP_Insert")   # translations: PRIMARY
+        return
+    send("shift+Insert")          # translations: CLIPBOARD
+
+#  Slash commands, reachable from the ⌘ button. Submitting one opens its own
+#  picker (model, sessions, ...) which the arrow keys and Enter then drive.
+COMMANDS = [("Модель",        "/model"),
+            ("Сессии",        "/resume"),
+            ("Очистить чат",  "/clear"),
+            ("Сжать контекст", "/compact"),
+            ("Контекст",      "/context"),
+            ("Статус",        "/status"),
+            ("Расходы",       "/cost"),
+            ("Память",        "/memory"),
+            ("Настройки",     "/config"),
+            ("Голос",         "/voice"),
+            ("Справка",       "/help")]
+
+#  Keystrokes that have no slash command - they ride in the same menu.
+KEYS = [("В фон (ctrl+b)",     "ctrl+b"),
+        ("Транскрипт (ctrl+o)", "ctrl+o"),
+        ("Отменить (ctrl+_)",  "ctrl+underscore"),
+        ("Режим (shift+tab)",  "shift+Tab")]
+
+menu = tk.Menu(root, tearoff=0, bg=BAR, fg="#e6edf3",
+               activebackground="#d97757", activeforeground="#ffffff",
+               font=("Hack", 13), bd=0)
+for title, cmd in COMMANDS:
+    menu.add_command(label="  %-16s %s  " % (title, cmd),
+                     command=lambda c=cmd: run_command(c))
+menu.add_separator()
+for title, key in KEYS:
+    menu.add_command(label="  %-24s  " % title, command=lambda k=key: send(k))
+
+def show_menu(widget):
+    menu.tk_popup(widget.winfo_rootx(),
+                  widget.winfo_rooty() - menu.yposition(len(COMMANDS) + len(KEYS) + 1))
+
+VOICE_KEY = "alt+k"   # see ~/.claude/keybindings.json
+
+recording = False
+
+def voice_tap():
+    """Tap to talk, tap again to send.
+
+    Claude's own `autoSubmit` is hold-mode only, and hold mode cannot work here:
+    a terminal never reports key release, so it watches for the key's
+    auto-repeat, and xterm just types the key instead. In tap mode the
+    transcription is therefore left sitting in the prompt - and voice refuses to
+    start while the prompt has text, which is what made the button one-shot.
+    So the second tap submits it here, which empties the prompt and leaves the
+    button ready for the next thing he wants to say.
+    """
+    global recording
+    send(VOICE_KEY)
+    if recording:
+        root.after(3000, lambda: send("Return"))
+    recording = not recording
+
+#  label          action                                      colour
+BTNS = [("💡",          lambda: send("Tab"),       "#3f6b43"),
+        ("⏎",           lambda: send("Return"),    "#2d5680"),
+
+        ("📋",          paste,                     "#3a4a5a"),
+        ("↑",           lambda: send("Up"),        "#2a323d"),
+        ("↓",           lambda: send("Down"),      "#2a323d"),
+        ("Esc",         lambda: send("Escape"),    "#2a323d"),
+        ("📜",          lambda: send("ctrl+o"),    "#4a3a5a"),
+        ("▲",           lambda: send("alt+u"),        "#2a323d"),
+        ("▼",           lambda: send("alt+d"),        "#2a323d")]
+
+for label, action, colour in BTNS:
+    tk.Button(bar, text=label, command=action,
+              takefocus=0, bg=colour, fg="#e6edf3", activebackground=colour,
+              font=("Hack", 11, "bold"), bd=0, highlightthickness=0,
+              padx=6, pady=14).pack(side="left", padx=2, pady=5)
+
+repeat_job = None
+
+def repeat_start(key):
+    """Hold a button to repeat its key - for deleting several words in a row."""
+    def tick(delay):
+        global repeat_job
+        send(key)
+        repeat_job = root.after(delay, lambda: tick(max(90, delay - 40)))
+    repeat_stop()
+    tick(400)
+
+def repeat_stop(_event=None):
+    global repeat_job
+    if repeat_job is not None:
+        root.after_cancel(repeat_job)
+        repeat_job = None
+
+word_btn = tk.Button(bar, text="⌫ слово", takefocus=0,
+                     bg="#5a3a3a", fg="#e6edf3", activebackground="#6b4747",
+                     font=("Hack", 11, "bold"), bd=0, highlightthickness=0,
+                     padx=6, pady=14)
+word_btn.bind("<ButtonPress-1>", lambda e: repeat_start("ctrl+w"))
+word_btn.bind("<ButtonRelease-1>", repeat_stop)
+word_btn.pack(side="left", padx=2, pady=5)
+
+voice_btn = tk.Button(bar, text="🎙 Говорить", takefocus=0,
+                      bg="#d97757", fg="#e6edf3", activebackground="#e08a6a",
+                      font=("Hack", 11, "bold"), bd=0, highlightthickness=0,
+                      padx=8, pady=14)
+voice_btn.configure(command=voice_tap)
+voice_btn.pack(side="left", padx=2, pady=5, before=bar.winfo_children()[0])
+
+cmd_btn = tk.Button(bar, text="⌘ Команды", takefocus=0,
+                    bg="#4a4a2a", fg="#e6edf3", activebackground="#4a4a2a",
+                    font=("Hack", 11, "bold"), bd=0, highlightthickness=0,
+                    padx=6, pady=14)
+cmd_btn.configure(command=lambda: show_menu(cmd_btn))
+cmd_btn.pack(side="left", padx=2, pady=5)
+
+def launch():
+    global xterm_wid
+    root.update_idletasks()
+    before = set(xdo("search", "--class", "xterm").split())
+    # If the console itself was started from inside a Claude session, the
+    # inherited CLAUDE_CODE_* markers make the child think it is a subagent and
+    # it stops writing a transcript - which would leave the pin nothing to
+    # resume. The terminal always gets a clean, top-level environment.
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("CLAUDE_CODE_", "CLAUDE_PID", "CLAUDECODE",
+                                "CLAUDE_EFFORT", "AI_AGENT"))}
+    global term_proc
+    term_proc = subprocess.Popen(
+        env=env, args=["xterm", "-into", str(term.winfo_id()),
+         "-fa", "Hack", "-fs", "13", "-u8", "-b", "6",
+         "-bg", BG, "-fg", "#e6edf3", "-sb", "-rightbar", "-sl", "20000",
+         "-xrm", "XTerm*allowSendEvents: true",
+         "-xrm", "XTerm*scrollBar: true",
+         "-xrm", "XTerm*rightScrollBar: true",
+         "-xrm", "XTerm*scrollTtyOutput: false",
+         # A drag should land straight in the clipboard - there is no middle
+         # mouse button to paste the PRIMARY selection with on a Deck.
+         "-xrm", "XTerm*selectToClipboard: true",
+         "-xrm", "XTerm*trimSelection: true",
+         "-xrm", "XTerm*on2Clicks: word",
+         "-xrm", "XTerm*on3Clicks: line",
+         # Claude's own shortcuts use meta+<key>; xterm must send those as ESC-
+         # prefixed sequences rather than setting the high bit.
+         "-xrm", "XTerm*VT100.translations: #override "
+                 "Shift <Key>Insert: insert-selection(CLIPBOARD) \\n"
+                 "Shift <Key>KP_Insert: insert-selection(PRIMARY)",
+         "-xrm", "XTerm*metaSendsEscape: true",
+         "-xrm", "XTerm*eightBitInput: false",
+         "-e", "bash", "-lc", CMD])
+    def close(_event=None):
+        # Closing the window used to leave the xterm - and the Claude session
+        # inside it - running invisibly, reparented to init.
+        try:
+            term_proc.terminate()
+        except OSError:
+            pass
+        root.destroy()
+    root.protocol("WM_DELETE_WINDOW", close)
+
+    def find(tries=40):
+        global xterm_wid
+        now = set(xdo("search", "--class", "xterm").split())
+        new = now - before
+        if new:
+            xterm_wid = sorted(new)[-1]
+            fit()
+        elif tries:
+            root.after(250, lambda: find(tries - 1))
+    root.after(400, find)
+
+def fit(_event=None):
+    if xterm_wid:
+        xdo("windowmove", xterm_wid, "0", "0")
+        xdo("windowsize", xterm_wid, str(term.winfo_width()), str(term.winfo_height()))
+
+term.bind("<Configure>", fit)
+root.after(200, launch)
+root.mainloop()

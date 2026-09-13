@@ -1,0 +1,9 @@
+#!/bin/bash
+# decktts [on|off|auto|say <text>|stop] - control the Deck's speech output
+STATE=$HOME/.local/share/decktts
+case "$1" in
+  on|off|auto) echo "$1" > "$STATE/mode"; echo "TTS: $1" ;;
+  say)  shift; $HOME/.local/bin/decksay "$*" ;;
+  stop) $HOME/.local/bin/decksay --stop ;;
+  *)    echo "TTS: $(cat "$STATE/mode" 2>/dev/null || echo auto)  (on|off|auto|say|stop)" ;;
+esac

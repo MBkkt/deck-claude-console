@@ -1,0 +1,466 @@
+#!/usr/bin/python3
+"""Deck Console on VTE - one GTK4 window: a real terminal plus a touch bar.
+
+The xterm version (`deckconsole`) stays installed and untouched as the fallback.
+This one embeds VTE 0.84, the terminal widget behind gnome-terminal, which gives
+touch scrolling, proper selection and a native clipboard - and the buttons write
+straight into the terminal's pty, so there is no `xdotool`, no window focus
+juggling and no synthetic X events at all.
+
+  DECK_CONSOLE_CMD       what to run inside (default: the pinned Claude session)
+  DECK_CONSOLE_SESSION   session UUID to pin to - this also becomes the new
+                         stored pin, so it is how you re-point the console
+  DECK_CONSOLE_GEOMETRY  WxH, e.g. 640x772, for a test window beside the real one
+"""
+import os, shutil, subprocess, sys, uuid
+import gi
+gi.require_version("Gtk", "4.0")
+gi.require_version("Vte", "3.91")
+from gi.repository import Gtk, Vte, GLib, Gdk, Gio, Pango
+
+HOME    = os.path.expanduser("~")
+STATE   = os.path.join(HOME, ".local/state/deckconsole")
+PINFILE = os.path.join(STATE, "session-id")
+TMUXCONF = os.path.join(HOME, ".config/tmux/deck.conf")
+# Claude stores a directory's transcripts under a slugified copy of its path.
+PROJECT = os.path.join(HOME, ".claude/projects", "-" + HOME.strip("/").replace("/", "-"))
+
+BG   = "#0d1014"
+FG   = "#e6edf3"
+BAR  = "#161b22"
+
+
+def pinned_session():
+    """One stable session for the console.
+
+    `claude --continue` picks whichever transcript in the directory was written
+    to last, which on this box is just as likely to be a background session or
+    an empty forked stub - so the console used to come back to a stranger.
+    A pinned UUID always reopens the same conversation.
+    """
+    sid = os.environ.get("DECK_CONSOLE_SESSION", "")
+    if not sid:
+        try:
+            sid = open(PINFILE).read().strip()
+        except OSError:
+            sid = ""
+    if not sid:
+        sid = str(uuid.uuid4())
+    os.makedirs(STATE, exist_ok=True)
+    with open(PINFILE, "w") as fh:
+        fh.write(sid + "\n")
+    flag = "--resume" if os.path.exists(os.path.join(PROJECT, sid + ".jsonl")) \
+        else "--session-id"
+    inner = "claude %s %s" % (flag, sid)
+
+    # Wrapped in tmux so the session outlives its window: closing the console,
+    # locking the screen or losing the desktop no longer kills Claude or the
+    # work it is running in the background - reopening just re-attaches.
+    # `new-session -A` attaches if it is already there and creates it if not,
+    # which is also what keeps a second console from starting a rival copy.
+    if shutil.which("tmux"):
+        return ["tmux", "-L", "deck", "-f", TMUXCONF,
+                "new-session", "-A", "-s", "claude", "-c", HOME, inner]
+    return ["claude", flag, sid]
+
+
+#  Every button is just bytes written into the pty. Claude's own shortcuts are
+#  meta+<key>, which a terminal sends as ESC + key (see ~/.claude/keybindings.json).
+ESC   = b"\x1b"
+VOICE = ESC + b"k"          # meta+k -> voice:pushToTalk
+# Scrolling goes through ctrl+x chords, not meta+<letter>: the input editor
+# eats meta keys as readline commands - meta+f walks a word, meta+r searches
+# history and drops a previous prompt into the box, meta+d kills a word - so a
+# scroll button could silently edit what you were typing.
+CX    = b"\x18"             # ctrl+x, Claude's own chord prefix
+PGUP  = CX + b"u"           # ctrl+x u -> page up
+PGDN  = CX + b"d"           # ctrl+x d -> page down
+LINE_UP   = CX + b"p"       # ctrl+x p -> one line up
+LINE_DOWN = CX + b"n"       # ctrl+x n -> one line down
+STASH = b"\x13"            # ctrl+s -> park the prompt (toggles back)
+PROMPT = "\u276f"           # the ❯ Claude draws in front of the input
+RECORDING_MARK = "\u2581"   # the ▁ meter shown while dictating
+
+COMMANDS = ["/model", "/resume", "/clear", "/compact", "/context",
+            "/status", "/cost", "/memory", "/config", "/voice", "/help"]
+
+KEYS = [("Page up",    PGUP),
+        ("Page down",  PGDN),
+        ("Restore stash", STASH),
+        ("Enter",      b"\r"),
+        ("Esc",        ESC),
+        ("Complete",   b"\t"),
+        ("Del word",   b"\x17"),        # ctrl+w
+        ("Transcript", b"\x0f"),        # ctrl+o
+        ("Background", b"\x02"),        # ctrl+b
+        ("Undo",       b"\x1f"),        # ctrl+_
+        ("Mode",       ESC + b"[Z"),    # shift+tab
+        ("Interrupt",  b"\x03"),        # ctrl+c
+        ("Quit session", None)]          # ends tmux, not just this window
+
+
+class Console(Gtk.Application):
+    def __init__(self):
+        # NON_UNIQUE matters more than it looks: with a shared application id,
+        # *any* other process starting this app - a syntax check, a second tap
+        # on the launcher - reaches the instance already running and asks it to
+        # activate, and it obligingly opens another window onto the pinned
+        # session, on top of the conversation being held in the first one.
+        super().__init__(application_id="deck.console.vte",
+                         flags=Gio.ApplicationFlags.NON_UNIQUE)
+        self.term = None
+        self.repeat = None
+        self.latched = False
+        self.press_time = 0
+        self.scroller = None
+        self.scroll_speed = 1.0
+        self.voice_btn = None
+
+    # ---- writing to the terminal -------------------------------------------
+    def feed(self, data):
+        if self.term:
+            self.term.feed_child(data)
+
+    def run_command(self, cmd):
+        """Type a slash command and submit it.
+
+        The leading "/" has to arrive on its own, with a pause after it: that is
+        what opens Claude's command menu. Sent in one burst with the rest of the
+        word, the line is submitted as an ordinary message instead.
+        """
+        self.feed(b"/")
+        GLib.timeout_add(450,  lambda: (self.feed(cmd.lstrip("/").encode()), False)[1])
+        GLib.timeout_add(1300, lambda: (self.feed(b"\r"), False)[1])
+
+    # ---- hold to talk -------------------------------------------------------
+    IDLE_LABEL   = "🎙 Hold to talk"
+    HOLD_LABEL   = "🔴 Listening…"
+    LATCH_LABEL  = "🔴 Tap to stop"
+    TAP_MS       = 250          # shorter than this and the press was a tap
+
+    def voice_press(self, *_a):
+        """Hold the button to dictate; let go to stop.
+
+        Tap mode is the wrong shape for this: there, the second tap *is* the
+        send - "REC · tap to send" - so pressing the button to say a bit more
+        fired the message off instead, and dictation refused to start at all
+        while the prompt held text. Hold mode has neither problem: it records
+        on top of whatever is already typed and appends to it.
+
+        A terminal never reports key release, so hold mode watches the key's
+        auto-repeat. There is no real key here, so the repeat is produced
+        directly: the same bytes every 100ms for as long as the button is down.
+        """
+        if self.latched:                 # a tap while latched means "stop"
+            self.voice_end()
+            return
+        self.press_time = GLib.get_monotonic_time()
+        self.repeat_stop()
+        self.feed(VOICE)
+        self.repeat = GLib.timeout_add(100, lambda: (self.feed(VOICE), True)[1])
+        self.voice_btn.set_label(self.HOLD_LABEL)
+        self.voice_btn.add_css_class("talking")
+
+    def voice_release(self, *_a):
+        """A quick tap latches; a real hold ends when the finger lifts."""
+        if self.latched or self.repeat is None:
+            return
+        held_ms = (GLib.get_monotonic_time() - self.press_time) / 1000
+        if held_ms < self.TAP_MS:
+            self.latched = True
+            self.voice_btn.set_label(self.LATCH_LABEL)
+            self.voice_btn.add_css_class("talking")
+        else:
+            self.voice_end()
+
+    def voice_end(self):
+        self.repeat_stop()
+        self.latched = False
+        self.voice_btn.set_label(self.IDLE_LABEL)
+        self.voice_btn.remove_css_class("talking")
+
+    def quit_session(self):
+        """End the tmux session for real - closing the window only detaches."""
+        subprocess.run(["tmux", "-L", "deck", "kill-session", "-t", "claude"],
+                       capture_output=True)
+
+    # ---- scrolling ----------------------------------------------------------
+    SCROLL_GAIN = 1.18          # each tick a little faster than the last
+    SCROLL_MAX  = 6.0           # at most six lines per tick
+
+    def scroll_start(self, up):
+        """Glide the view, picking up speed while the button is held.
+
+        Scrolling cannot be done on this side: Claude's TUI runs on the
+        alternate screen, so the terminal has no scrollback of its own to move
+        (tmux reports `alternate_on=1`, history size zero). It has to be asked,
+        and it only offers whole pages or single lines - pages jump too far to
+        read. So this sends the line-scroll key, faster and faster, and several
+        times per tick once it is up to speed, which reads as a glide.
+        """
+        self.scroll_stop()
+        self.scroll_speed = 1.0
+        key = LINE_UP if up else LINE_DOWN
+        self.feed(key)
+
+        def step():
+            for _ in range(int(self.scroll_speed)):
+                self.feed(key)
+            self.scroll_speed = min(self.SCROLL_MAX,
+                                    self.scroll_speed * self.SCROLL_GAIN)
+            return True
+
+        self.scroller = GLib.timeout_add(70, step)
+
+    def scroll_stop(self, *_a):
+        if self.scroller is not None:
+            GLib.source_remove(self.scroller)
+            self.scroller = None
+
+    # ---- hold-to-repeat (deleting several words in a row) -------------------
+    def repeat_start(self, data, delay=400):
+        self.repeat_stop()
+        def tick(d):
+            self.feed(data)
+            self.repeat = GLib.timeout_add(d, tick, max(90, d - 40))
+            return False
+        tick(delay)
+
+    def repeat_stop(self, *_a):
+        if self.repeat is not None:
+            GLib.source_remove(self.repeat)
+            self.repeat = None
+
+    # ---- building the window ------------------------------------------------
+    def button(self, label, colour, on_click, hold=None):
+        btn = Gtk.Button(label=label)
+        btn.set_can_focus(False)
+        btn.add_css_class("deckbtn")
+        btn.set_name(colour)
+        if hold is not None:
+            gesture = Gtk.GestureClick()
+            gesture.connect("pressed",  lambda *_a: self.repeat_start(hold))
+            gesture.connect("released", self.repeat_stop)
+            gesture.connect("cancel",   self.repeat_stop)
+            btn.add_controller(gesture)
+        else:
+            btn.connect("clicked", on_click)
+        return btn
+
+    def do_activate(self):
+        win = Gtk.ApplicationWindow(application=self, title="Claude Console")
+        geo = os.environ.get("DECK_CONSOLE_GEOMETRY", "1280x800")
+        try:
+            w, h = (int(v) for v in geo.lower().split("x")[:2])
+        except ValueError:
+            w, h = 1280, 800
+        win.set_default_size(w, h)
+        # Half the screen is the useful floor: narrower and the buttons start
+        # fighting each other for room, and a terminal that thin is unreadable.
+        win.set_size_request(624, 320)
+        # In Game Mode there is no window manager to maximise us.
+        if not os.environ.get("DECK_CONSOLE_GEOMETRY") and (
+                os.environ.get("GAMESCOPE_WAYLAND_DISPLAY")
+                or os.path.exists("/tmp/.X11-unix/X1")
+                and "gamescope" in os.popen("pgrep -al gamescope-session").read()):
+            win.fullscreen()
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        win.set_child(box)
+
+        self.term = Vte.Terminal(vexpand=True, hexpand=True)
+        self.term.set_font(Pango.FontDescription("Hack 13"))
+        self.term.set_scrollback_lines(100000)
+        self.term.set_scroll_on_output(False)
+        self.term.set_scroll_on_keystroke(True)
+        self.term.set_mouse_autohide(True)
+        fg, bg = Gdk.RGBA(), Gdk.RGBA()
+        fg.parse(FG); bg.parse(BG)
+        self.term.set_colors(fg, bg, None)
+        self.term.connect("child-exited", lambda *_a: win.close())
+        # Selecting already means "I want this" - put it straight into the
+        # clipboard so there is nothing to press afterwards.
+        self.term.connect("selection-changed",
+                          lambda t: t.copy_clipboard_format(Vte.Format.TEXT)
+                          if t.get_has_selection() else None)
+        box.append(self.term)
+
+        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        bar.set_margin_top(5); bar.set_margin_bottom(5)
+        bar.set_margin_start(4); bar.set_margin_end(4)
+        box.append(bar)
+        made = {}                    # built here, placed in his order below
+
+        voice = Gtk.Button(label=self.IDLE_LABEL)
+        self.voice_btn = voice
+        voice.set_can_focus(False)
+        voice.add_css_class("voice")
+        # Fixed: a button that resizes when its label changes is unsettling to
+        # aim at, and this one changes label three times a sentence.
+        voice.set_size_request(200, -1)
+        voice_gesture = Gtk.GestureClick()
+        voice_gesture.connect("pressed",  self.voice_press)
+        voice_gesture.connect("released", self.voice_release)
+        voice_gesture.connect("cancel",   self.voice_release)
+        voice.add_controller(voice_gesture)
+        made["voice"] = voice
+
+        # Everything the Deck's own buttons already do (arrows, Esc, Enter,
+        # Tab) is gone from the bar and lives on the gamepad or in the menu.
+        # What is left is what no physical button can do.
+        for label, css in (("📋 Paste", "slate"),
+                           ("▲",           "grey"),
+                           ("▼",           "grey")):
+            btn = Gtk.Button(label=label)
+            btn.set_can_focus(False)
+            btn.add_css_class(css)
+            if label in ("▲", "▼"):
+                btn.set_size_request(44, -1)     # small: rarely a mis-tap risk
+            elif label.startswith("\U0001F4CB"):
+                btn.set_size_request(84, -1)
+            if label.startswith("\U0001F4CB"):
+                # Pasting ends the dictation for the same reason erasing does:
+                # the text that arrives afterwards would land past the edit.
+                btn.connect("clicked", lambda *_a: (self.voice_end(),
+                                                    self.term.paste_clipboard()))
+            else:
+                up = label == "▲"
+                gesture = Gtk.GestureClick()
+                gesture.connect("pressed",  lambda *_a, u=up: self.scroll_start(u))
+                gesture.connect("released", self.scroll_stop)
+                gesture.connect("cancel",   self.scroll_stop)
+                btn.add_controller(gesture)
+            made[label] = btn
+
+        # No free gamepad button for this one - the Deck's desktop layout already
+        # spends A/B/X/Y on Enter/Esc/keyboard/Space - so it stays in the bar.
+        word = Gtk.Button(label="⌫ Word")
+        word.set_can_focus(False)
+        word.add_css_class("red")
+        word.set_size_request(110, -1)
+        word_gesture = Gtk.GestureClick()
+        # Erasing a word ends the dictation: whatever is said next would land
+        # after the edit, so leaving the microphone latched is never what he
+        # meant. Pressing this is the same as tapping the voice button off.
+        word_gesture.connect("pressed",  lambda *_a: (self.voice_end(),
+                                                      self.repeat_start(b"\x17")))
+        word_gesture.connect("released", self.repeat_stop)
+        word_gesture.connect("cancel",   self.repeat_stop)
+        word.add_controller(word_gesture)
+        made["word"] = word
+
+        menu = Gtk.Popover()
+        menu_box = Gtk.Grid(column_spacing=4, row_spacing=4,
+                            column_homogeneous=True)
+        menu_box.slot = 0
+        # Twenty touch-sized rows are taller than the screen, and a popover that
+        # does not fit is simply clipped - so it scrolls.
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroller.set_propagate_natural_height(True)
+        scroller.set_max_content_height(520)
+        scroller.set_min_content_width(560)
+        scroller.set_child(menu_box)
+        menu.set_child(scroller)
+        def place(item):
+            menu_box.attach(item, menu_box.slot % 3, menu_box.slot // 3, 1, 1)
+            menu_box.slot += 1
+
+        for cmd in COMMANDS:
+            item = Gtk.Button(label=cmd)
+            item.set_can_focus(False)
+            item.add_css_class("item")
+            item.connect("clicked",
+                         lambda _b, c=cmd: (menu.popdown(), self.run_command(c)))
+            place(item)
+        while menu_box.slot % 3:                     # finish the row first
+            place(Gtk.Label(label=""))
+        sep = Gtk.Separator()
+        menu_box.attach(sep, 0, menu_box.slot // 3, 3, 1)
+        menu_box.slot += 3
+        for title, data in KEYS:
+            item = Gtk.Button(label=title)
+            item.set_can_focus(False)
+            item.add_css_class("key")
+            if data is None:
+                item.connect("clicked",
+                             lambda *_a: (menu.popdown(), self.quit_session()))
+            else:
+                item.connect("clicked",
+                             lambda _b, d=data: (menu.popdown(), self.feed(d)))
+            place(item)
+
+        # A plain button, not a Gtk.MenuButton: the MenuButton draws its own
+        # button inside itself, and the KDE theme kept painting that one black
+        # on light grey no matter which selector the style used.
+        cmd_btn = Gtk.Button(label="⌘ Commands")
+        cmd_btn.set_can_focus(False)
+        cmd_btn.add_css_class("olive")
+        cmd_btn.set_size_request(110, -1)
+        menu.set_parent(cmd_btn)
+        menu.set_position(Gtk.PositionType.TOP)
+        cmd_btn.connect("clicked", lambda *_a: menu.popup())
+        made["cmd"] = cmd_btn
+
+        # His order, left to right: the rarely-pressed things first, and the
+        # two he reaches for straight after speaking at the far end, under the
+        # thumb that is already there.
+        for widget in made.values():                 # let labels shrink with
+            child = widget.get_child()                # the window instead of
+            if isinstance(child, Gtk.Label):          # setting its floor
+                child.set_ellipsize(Pango.EllipsizeMode.END)
+
+        for key in ("cmd", "gap", "▼", "▲", "📋 Paste", "word", "voice"):
+            if key == "gap":
+                spacer = Gtk.Box()
+                spacer.set_hexpand(True)         # the slack lives here, not in
+                bar.append(spacer)               # the buttons themselves
+                continue
+            bar.append(made[key])
+
+        css = Gtk.CssProvider()
+        css.load_from_data(b"""
+            window, box { background: #0d1014; }
+            button { color: #e6edf3; border: none; border-radius: 6px;
+                     padding: 14px 8px; font-family: Hack, monospace;
+                     font-weight: bold; font-size: 12px; background: #2a323d; }
+            button.voice  { background: #d97757; }
+            button.talking { background: #b03030; }
+            button.green  { background: #3f6b43; }
+            button.blue   { background: #2d5680; }
+            button.slate  { background: #3a4a5a; }
+            button.violet { background: #4a3a5a; }
+            button.red    { background: #5a3a3a; }
+            button.grey   { background: #2a323d; }
+            button.olive  { background: #4a4a2a; }
+            button.item   { background: #232c38; padding: 14px 10px;
+                            font-weight: normal; }
+            button.key    { background: #2f3a46; padding: 14px 10px;
+                            font-weight: normal; }
+            button.item:hover, button.key:hover { background: #d97757; }
+            popover contents { background: #161b22; padding: 4px; }
+        """)
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+        argv = ["bash", "-lc", os.environ["DECK_CONSOLE_CMD"]] \
+            if os.environ.get("DECK_CONSOLE_CMD") else pinned_session()
+        # A console launched from inside a Claude session inherits CLAUDE_CODE_*,
+        # which makes the child think it is a subagent and stop writing a
+        # transcript - leaving the pin nothing to resume. VTE's `envv` only adds
+        # to the inherited environment and cannot remove anything from it, so
+        # the markers have to be dropped by `env -u` in the child itself.
+        drop = [k for k in os.environ
+                if k.startswith(("CLAUDE_CODE_", "CLAUDE_PID", "CLAUDECODE",
+                                 "CLAUDE_EFFORT", "AI_AGENT"))]
+        argv = ["env"] + sum((["-u", k] for k in drop), []) + argv
+        self.term.spawn_async(Vte.PtyFlags.DEFAULT, HOME, argv, None,
+                              GLib.SpawnFlags.SEARCH_PATH, None, None, -1,
+                              None, None, None)
+
+        win.present()
+        self.term.grab_focus()
+
+
+if __name__ == "__main__":
+    sys.exit(Console().run([]))

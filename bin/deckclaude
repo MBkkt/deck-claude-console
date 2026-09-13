@@ -1,0 +1,8 @@
+#!/bin/bash
+# Open the Claude console. Prefers the VTE version; falls back to the xterm one
+# if the Vte typelib is missing (a SteamOS update wipes /usr and takes it away).
+export PATH="$HOME/.local/bin:$PATH"
+if python3 -c 'import gi; gi.require_version("Vte","3.91")' 2>/dev/null; then
+    exec "$HOME/.local/bin/deckconsole-vte" "$@"
+fi
+exec "$HOME/.local/bin/deckconsole" "$@"

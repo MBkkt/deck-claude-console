@@ -1,0 +1,45 @@
+#!/bin/bash
+# decksay - speak text with Piper (neural TTS). Picks ru/en from the text itself.
+#   decksay "text"      | echo text | decksay
+#   decksay --stop      stop whatever is being spoken
+BASE=$HOME/.local/share/decktts
+PY=$BASE/venv/bin/python
+VOICES=$BASE/voices
+PIDFILE=$BASE/speaking.pid
+
+stop_current() {
+  [ -f "$PIDFILE" ] || return 0
+  while read -r p; do kill "$p" 2>/dev/null; done < "$PIDFILE"
+  rm -f "$PIDFILE"
+}
+
+[ "$1" = "--stop" ] && { stop_current; exit 0; }
+
+text=${1:-$(cat)}
+# strip markdown / code / urls so it reads like speech, not like a file
+text=$(printf '%s' "$text" | python3 -c '
+import re,sys
+t=sys.stdin.read()
+t=re.sub(r"```.*?```"," (код) ",t,flags=re.S)
+t=re.sub(r"`[^`]*`"," ",t)
+t=re.sub(r"https?://\S+"," ссылка ",t)
+t=re.sub(r"[*_#>|\[\]()~]"," ",t)
+t=re.sub(r"\s+"," ",t).strip()
+sys.stdout.write(t[:1500])')
+[ -z "$text" ] && exit 0
+
+case "$text" in
+  *[А-Яа-яЁё]*) MODEL=$VOICES/ru_RU-dmitri-medium.onnx ;;
+  *)            MODEL=$VOICES/en_US-amy-medium.onnx ;;
+esac
+
+stop_current
+mkdir -p "$BASE"
+printf '%s' "$text" \
+  | "$PY" -m piper -m "$MODEL" --output-raw 2>/dev/null \
+  | pw-play --rate 22050 --format s16 --channels 1 - >/dev/null 2>&1 &
+# record the whole pipeline so --stop can kill it
+jobs -p > "$PIDFILE"
+pgrep -P $$ >> "$PIDFILE" 2>/dev/null
+wait
+rm -f "$PIDFILE"

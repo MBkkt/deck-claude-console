@@ -1,0 +1,14 @@
+# nothing here should ever be committed
+*.log
+*.png
+*.bak
+__pycache__/
+*.pyc
+.venv/
+
+# local state, not configuration
+session-id
+*.local.json
+
+# scratch
+/tmp/
