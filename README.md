@@ -62,6 +62,10 @@ decktts speed 1.2       # or + / - to nudge it
 decktts stop            # shut up right now
 ```
 
+One gotcha worth knowing: `pw-play` needs `--raw` for a raw PCM stream. Without
+it (PipeWire 1.6.8 at least) it tries to sniff the format, fails with "Format not
+recognised", and the synthesis runs perfectly while nothing comes out.
+
 Settings live in `~/.local/share/decktts/config`; voices are Piper `.onnx` files
 in `~/.local/share/decktts/voices`, and the language is picked from the text
 itself, so a Russian reply is read by the Russian voice without being told.
