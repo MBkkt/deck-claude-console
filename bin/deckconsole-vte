@@ -97,9 +97,7 @@ KEYS = [("Page up",     PGUP),
 
 #  Speech settings, so they can be changed from the couch instead of asked for.
 #  Each runs `decktts`, which keeps the state in ~/.local/share/decktts/config.
-RUNS = [("Speech on",    ["decktts", "on"]),
-        ("Speech auto",  ["decktts", "auto"]),
-        ("Speech off",   ["decktts", "off"]),
+RUNS = [("Speech",       ["decktts", "cycle"]),   # on -> auto -> off
         ("Stop talking", ["decktts", "stop"]),
         ("Slower",       ["decktts", "speed", "-"]),
         ("Faster",       ["decktts", "speed", "+"]),
@@ -123,6 +121,7 @@ class Console(Gtk.Application):
         self.scroller = None
         self.scroll_speed = 1.0
         self.voice_btn = None
+        self.speech_item = None
 
     # ---- writing to the terminal -------------------------------------------
     def feed(self, data):
@@ -186,6 +185,16 @@ class Console(Gtk.Application):
         self.latched = False
         self.voice_btn.set_label(self.IDLE_LABEL)
         self.voice_btn.remove_css_class("talking")
+
+    def refresh_speech(self):
+        if not self.speech_item:
+            return
+        try:
+            mode = subprocess.run(["decktts", "mode"], capture_output=True,
+                                  text=True, timeout=2).stdout.strip()
+        except (subprocess.SubprocessError, OSError):
+            mode = ""
+        self.speech_item.set_label("Speech: %s" % (mode or "?"))
 
     def run_tool(self, argv):
         """Fire off a helper script without blocking the interface."""
@@ -417,7 +426,13 @@ class Console(Gtk.Application):
             item.add_css_class("run")
             item.connect("clicked",
                          lambda _b, a=argv: (menu.popdown(), self.run_tool(a)))
+            if title == "Speech":
+                self.speech_item = item
             place(item)
+
+        # The speech setting is one button that cycles, so its label has to say
+        # where the cycle currently stands - read when the menu opens.
+        menu.connect("notify::visible", lambda *_a: self.refresh_speech())
 
         cmd_btn = Gtk.Button(label="⌘ Commands")
         cmd_btn.set_can_focus(False)

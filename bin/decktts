@@ -22,6 +22,11 @@ set_key() {                       # set_key KEY VALUE
 
 case "$1" in
   on|off|auto) echo "$1" > "$STATE/mode"; echo "speech: $1" ;;
+  cycle)                                  # on -> auto -> off -> on
+    cur=$(cat "$STATE/mode" 2>/dev/null || echo auto)
+    case "$cur" in on) next=auto ;; auto) next=off ;; *) next=on ;; esac
+    echo "$next" > "$STATE/mode"; echo "speech: $next" ;;
+  mode) cat "$STATE/mode" 2>/dev/null || echo auto ;;
   voices)
     for f in "$VOICES"/*.onnx; do
       [ -e "$f" ] || continue
