@@ -247,10 +247,20 @@ class Console(Gtk.Application):
         self.keyboard(on)
         if not on or not self.term:
             return
-        win = self.term.get_root()
-        if win:
-            win.set_focus(None)
-        GLib.timeout_add(150, lambda: (self.term.grab_focus(), False)[1])
+        # The focus has to genuinely move for the input method to deactivate
+        # and activate again - that activation is what KWin answers with the
+        # keyboard. Clearing the focus is not enough: nothing changes hands,
+        # so the second and later presses did nothing at all. Parking it on a
+        # button for a moment makes the change real.
+        self.voice_btn.set_can_focus(True)
+        self.voice_btn.grab_focus()
+
+        def back():
+            self.term.grab_focus()
+            self.voice_btn.set_can_focus(False)
+            return False
+
+        GLib.timeout_add(250, back)
 
     def run_tool(self, argv):
         """Fire off a helper script without blocking the interface."""
