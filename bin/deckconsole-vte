@@ -183,6 +183,31 @@ class Console(Gtk.Application):
         else:
             self.voice_end()
 
+    def on_key(self, _ctrl, keyval, _code, _state):
+        """Notice Enter going past, and pick the dictation back up after it.
+
+        Submitting ends the dictation on Claude's side, but the latch here knew
+        nothing about it - so the button still said "Talking" while the
+        microphone was off, and it took two presses to get going again: one to
+        clear a state that was already stale, one to start. The Deck's A button
+        sends a real Enter, and GTK hands key events to the window before the
+        terminal gets them, so it can be seen on its way past and the recording
+        started again a moment later. The key itself is not touched.
+        """
+        if self.latched and keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+            self.repeat_stop()
+            # Long enough for the message to go and the transcription to land,
+            # short enough that a sentence started straight after is not lost.
+            GLib.timeout_add(900, self.voice_rearm)
+        return False
+
+    def voice_rearm(self):
+        if self.latched:
+            self.feed(VOICE)
+            self.repeat = GLib.timeout_add(100,
+                                           lambda: (self.feed(VOICE), True)[1])
+        return False
+
     def voice_end(self):
         self.repeat_stop()
         self.latched = False
@@ -340,6 +365,11 @@ class Console(Gtk.Application):
                           lambda t: t.copy_clipboard_format(Vte.Format.TEXT)
                           if t.get_has_selection() else None)
         box.append(self.term)
+
+        keys = Gtk.EventControllerKey()
+        keys.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        keys.connect("key-pressed", self.on_key)
+        win.add_controller(keys)
 
         bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         bar.set_margin_top(5); bar.set_margin_bottom(5)
