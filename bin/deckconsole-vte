@@ -194,11 +194,20 @@ class Console(Gtk.Application):
         terminal gets them, so it can be seen on its way past and the recording
         started again a moment later. The key itself is not touched.
         """
-        if self.latched and keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
+        if not self.latched:
+            return False
+        if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
             self.repeat_stop()
             # Long enough for the message to go and the transcription to land,
             # short enough that a sentence started straight after is not lost.
             GLib.timeout_add(900, self.voice_rearm)
+        elif keyval == Gdk.KEY_Escape:
+            # While dictating, this window is sending ESC k every 100ms. A real
+            # Escape lands in the middle of that stream and the next "k" glues
+            # itself onto it, so Claude reads meta+k instead - the Escape is
+            # simply eaten. Standing back for a moment lets it through alone.
+            self.repeat_stop()
+            GLib.timeout_add(500, self.voice_rearm)
         return False
 
     def voice_rearm(self):
