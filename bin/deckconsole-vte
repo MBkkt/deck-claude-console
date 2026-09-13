@@ -125,6 +125,7 @@ class Console(Gtk.Application):
         self.voice_btn = None
         self.settings_items = []
         self.kb_on = False
+        self.rearm = None
 
     # ---- writing to the terminal -------------------------------------------
     def feed(self, data):
@@ -161,6 +162,7 @@ class Console(Gtk.Application):
         auto-repeat. There is no real key here, so the repeat is produced
         directly: the same bytes every 100ms for as long as the button is down.
         """
+        self.rearm_cancel()
         if self.latched:                 # a tap while latched means "stop"
             self.voice_end()
             return
@@ -198,19 +200,33 @@ class Console(Gtk.Application):
             return False
         if keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
             self.repeat_stop()
+            self.rearm_cancel()
             # Long enough for the message to go and the transcription to land,
             # short enough that a sentence started straight after is not lost.
-            GLib.timeout_add(900, self.voice_rearm)
+            self.rearm = GLib.timeout_add(900, self.voice_rearm)
         elif keyval == Gdk.KEY_Escape:
             # While dictating, this window is sending ESC k every 100ms. A real
             # Escape lands in the middle of that stream and the next "k" glues
             # itself onto it, so Claude reads meta+k instead - the Escape is
             # simply eaten. Standing back for a moment lets it through alone.
             self.repeat_stop()
-            GLib.timeout_add(500, self.voice_rearm)
+            self.rearm_cancel()
+            self.rearm = GLib.timeout_add(500, self.voice_rearm)
         return False
 
+    def rearm_cancel(self):
+        if self.rearm is not None:
+            GLib.source_remove(self.rearm)
+            self.rearm = None
+
     def voice_rearm(self):
+        self.rearm = None
+        # Without this guard a press landing between the pause and the resume
+        # starts a second stream of keystrokes alongside the first, and only
+        # one of them can ever be stopped again - which is what left the
+        # microphone stuck on.
+        if self.repeat is not None:
+            return False
         if self.latched:
             self.feed(VOICE)
             self.repeat = GLib.timeout_add(100,
@@ -218,6 +234,7 @@ class Console(Gtk.Application):
         return False
 
     def voice_end(self):
+        self.rearm_cancel()
         self.repeat_stop()
         self.latched = False
         self.voice_btn.set_label(self.IDLE_LABEL)
@@ -243,6 +260,24 @@ class Console(Gtk.Application):
         """
         subprocess.run(["deckkbd", "on" if on else "off"], capture_output=True)
         self.kb_on = on
+        self.kb_log("keyboard(%s)" % on)
+
+    def kb_log(self, what):
+        """Write down what the keyboard actually did, to stop guessing."""
+        try:
+            out = subprocess.run(
+                ["gdbus", "call", "--session", "--dest", "org.kde.KWin",
+                 "--object-path", "/VirtualKeyboard", "--method",
+                 "org.freedesktop.DBus.Properties.GetAll",
+                 "org.kde.kwin.VirtualKeyboard"],
+                capture_output=True, text=True, timeout=3).stdout.strip()
+            focus = self.term.has_focus() if self.term else None
+            with open("/tmp/deckkbd.log", "a") as fh:
+                fh.write("%s  %-16s focus=%s  %s\n"
+                         % (GLib.DateTime.new_now_local().format("%H:%M:%S"),
+                            what, focus, out))
+        except Exception:
+            pass
 
     def keyboard_toggle(self, *_a):
         """Turn the keyboard on, and make the window ask for it again.
@@ -264,9 +299,13 @@ class Console(Gtk.Application):
         self.voice_btn.set_can_focus(True)
         self.voice_btn.grab_focus()
 
+        self.kb_log("focus->button")
+
         def back():
             self.term.grab_focus()
             self.voice_btn.set_can_focus(False)
+            self.kb_log("focus->term")
+            GLib.timeout_add(700, lambda: (self.kb_log("settled"), False)[1])
             return False
 
         GLib.timeout_add(250, back)

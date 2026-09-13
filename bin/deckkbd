@@ -13,8 +13,15 @@ get() { gdbus call "${OBJ[@]}" --method org.freedesktop.DBus.Properties.Get "$IF
 set_mode() { gdbus call "${OBJ[@]}" --method org.freedesktop.DBus.Properties.Set "$IFACE" mode \
              "<int32 $1>" >/dev/null 2>&1; }
 
+# Turning it on also restarts the input method: once KWin has been switched to
+# "never" it stops talking to the running plasma-keyboard altogether - the
+# process stays alive and silent, and no amount of mode flipping brings it
+# back. KWin starts a fresh one as soon as this one goes away.
+restart_im() { pkill -x plasma-keyboard 2>/dev/null; sleep 0.6; }
+
 case "${1:-toggle}" in
-  on)   set_mode 1; echo on ;;
+  on)   set_mode 1; restart_im; echo on ;;
   off)  set_mode 0; echo off ;;
-  *)    [ "$(get)" = "0" ] && { set_mode 1; echo on; } || { set_mode 0; echo off; } ;;
+  *)    [ "$(get)" = "0" ] && { set_mode 1; restart_im; echo on; } \
+                             || { set_mode 0; echo off; } ;;
 esac
