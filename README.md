@@ -51,6 +51,21 @@ sudo pacman -S vte4 python-gobject tmux
 Then run `deckclaude`. To have it in Game Mode, add `~/.local/bin/deckclaude` to
 Steam as a non-Steam game.
 
+Speech is configured from the console's own menu (Commands → Speech on/auto/off,
+faster, slower, next voice, test) or from the shell:
+
+```sh
+decktts                 # what it is set to now
+decktts auto            # speak only in Game Mode
+decktts voice ru_RU-irina-medium
+decktts speed 1.2       # or + / - to nudge it
+decktts stop            # shut up right now
+```
+
+Settings live in `~/.local/share/decktts/config`; voices are Piper `.onnx` files
+in `~/.local/share/decktts/voices`, and the language is picked from the text
+itself, so a Russian reply is read by the Russian voice without being told.
+
 For spoken replies, Piper lives in its own venv — see `bin/decksay` for the paths
 it expects, and `decktts on|off|auto` to switch it (`auto` means Game Mode only).
 

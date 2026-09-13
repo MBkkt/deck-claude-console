@@ -98,6 +98,17 @@ KEYS = [("Page up",    PGUP),
         ("Interrupt",  b"\x03"),        # ctrl+c
         ("Quit session", None)]          # ends tmux, not just this window
 
+#  Speech settings, so they can be changed from the couch instead of asked for.
+#  Each runs `decktts`, which keeps the state in ~/.local/share/decktts/config.
+RUNS = [("Speech on",    ["decktts", "on"]),
+        ("Speech auto",  ["decktts", "auto"]),
+        ("Speech off",   ["decktts", "off"]),
+        ("Stop talking", ["decktts", "stop"]),
+        ("Slower",       ["decktts", "speed", "-"]),
+        ("Faster",       ["decktts", "speed", "+"]),
+        ("Next voice",   ["decktts", "voice", "next", "ru"]),
+        ("Test voice",   ["decktts", "test"])]
+
 
 class Console(Gtk.Application):
     def __init__(self):
@@ -178,6 +189,14 @@ class Console(Gtk.Application):
         self.latched = False
         self.voice_btn.set_label(self.IDLE_LABEL)
         self.voice_btn.remove_css_class("talking")
+
+    def run_tool(self, argv):
+        """Fire off a helper script without blocking the interface."""
+        try:
+            subprocess.Popen(argv, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
+        except OSError:
+            pass
 
     def quit_session(self):
         """End the tmux session for real - closing the window only detaches."""
@@ -393,6 +412,16 @@ class Console(Gtk.Application):
         # A plain button, not a Gtk.MenuButton: the MenuButton draws its own
         # button inside itself, and the KDE theme kept painting that one black
         # on light grey no matter which selector the style used.
+        menu_box.attach(Gtk.Separator(), 0, menu_box.slot // 3, 3, 1)
+        menu_box.slot += 3
+        for title, argv in RUNS:
+            item = Gtk.Button(label=title)
+            item.set_can_focus(False)
+            item.add_css_class("run")
+            item.connect("clicked",
+                         lambda _b, a=argv: (menu.popdown(), self.run_tool(a)))
+            place(item)
+
         cmd_btn = Gtk.Button(label="⌘ Commands")
         cmd_btn.set_can_focus(False)
         cmd_btn.add_css_class("olive")
@@ -437,7 +466,10 @@ class Console(Gtk.Application):
                             font-weight: normal; }
             button.key    { background: #2f3a46; padding: 14px 10px;
                             font-weight: normal; }
-            button.item:hover, button.key:hover { background: #d97757; }
+            button.run    { background: #2a3f38; padding: 14px 10px;
+                            font-weight: normal; }
+            button.item:hover, button.key:hover,
+            button.run:hover { background: #d97757; }
             popover contents { background: #161b22; padding: 4px; }
         """)
         Gtk.StyleContext.add_provider_for_display(

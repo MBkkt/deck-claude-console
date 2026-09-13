@@ -1,9 +1,64 @@
 #!/bin/bash
-# decktts [on|off|auto|say <text>|stop] - control the Deck's speech output
+# decktts - control the Deck's speech output.
+#
+#   decktts                     show current settings
+#   decktts on | off | auto     when to speak (auto = Game Mode only)
+#   decktts voices              list installed voices
+#   decktts voice <name>        pick a voice (ru_* or en_* decides which slot)
+#   decktts speed <0.5..2.0>    1.0 is normal, higher is faster
+#   decktts say <text>          speak something
+#   decktts test                speak a sample in both languages
+#   decktts stop                stop speaking right now
 STATE=$HOME/.local/share/decktts
+CONF=$STATE/config
+VOICES=$STATE/voices
+mkdir -p "$STATE"
+[ -f "$CONF" ] || printf 'RU_VOICE=ru_RU-dmitri-medium\nEN_VOICE=en_US-amy-medium\nSPEED=1.0\n' > "$CONF"
+
+set_key() {                       # set_key KEY VALUE
+  if grep -q "^$1=" "$CONF"; then sed -i "s#^$1=.*#$1=$2#" "$CONF"
+  else printf '%s=%s\n' "$1" "$2" >> "$CONF"; fi
+}
+
 case "$1" in
-  on|off|auto) echo "$1" > "$STATE/mode"; echo "TTS: $1" ;;
-  say)  shift; $HOME/.local/bin/decksay "$*" ;;
-  stop) $HOME/.local/bin/decksay --stop ;;
-  *)    echo "TTS: $(cat "$STATE/mode" 2>/dev/null || echo auto)  (on|off|auto|say|stop)" ;;
+  on|off|auto) echo "$1" > "$STATE/mode"; echo "speech: $1" ;;
+  voices)
+    for f in "$VOICES"/*.onnx; do
+      [ -e "$f" ] || continue
+      n=$(basename "$f" .onnx)
+      case "$n" in ru_*|en_*) echo "$n" ;; esac
+    done ;;
+  voice)
+    if [ "$2" = "next" ]; then                 # cycle the voice for one language
+      . "$CONF"; lang=${3:-ru}
+      cur=$([ "$lang" = ru ] && echo "$RU_VOICE" || echo "$EN_VOICE")
+      list=$("$0" voices | grep "^${lang}_" )
+      [ -z "$list" ] && { echo "no ${lang} voices installed"; exit 1; }
+      next=$(echo "$list" | grep -A1 -x "$cur" | tail -1)
+      [ "$next" = "$cur" ] || [ -z "$next" ] && next=$(echo "$list" | head -1)
+      exec "$0" voice "$next"
+    fi
+    [ -n "$2" ] || { echo "usage: decktts voice <name>"; exit 1; }
+    [ -f "$VOICES/$2.onnx" ] || { echo "no such voice: $2"; exit 1; }
+    case "$2" in
+      ru_*) set_key RU_VOICE "$2" ;;
+      *)    set_key EN_VOICE "$2" ;;
+    esac
+    echo "voice: $2" ;;
+  speed)
+    [ -n "$2" ] || { echo "usage: decktts speed <0.5..2.0|+|->"; exit 1; }
+    if [ "$2" = "+" ] || [ "$2" = "-" ]; then
+      . "$CONF"
+      new=$(awk -v s="${SPEED:-1.0}" -v d="$2" \
+            'BEGIN{v = (d=="+") ? s+0.1 : s-0.1; if (v<0.5) v=0.5; if (v>2.0) v=2.0; printf "%.1f", v}')
+    else new=$2; fi
+    set_key SPEED "$new"; echo "speed: $new" ;;
+  say)  shift; "$HOME/.local/bin/decksay" "$*" ;;
+  test) "$HOME/.local/bin/decksay" "Проверка голоса. Так я буду звучать по-русски." ;;
+  stop) "$HOME/.local/bin/decksay" --stop ;;
+  *)
+    . "$CONF"
+    echo "speech: $(cat "$STATE/mode" 2>/dev/null || echo auto)"
+    echo "ru: ${RU_VOICE}   en: ${EN_VOICE}   speed: ${SPEED}"
+    echo "(on|off|auto | voices | voice <n> | speed <x> | say <text> | test | stop)" ;;
 esac

@@ -6,6 +6,14 @@ BASE=$HOME/.local/share/decktts
 PY=$BASE/venv/bin/python
 VOICES=$BASE/voices
 PIDFILE=$BASE/speaking.pid
+CONF=$BASE/config
+
+# Settings live in one small file so the console's menu can change them
+# without editing this script: RU_VOICE, EN_VOICE, SPEED.
+[ -f "$CONF" ] && . "$CONF"
+RU_VOICE=${RU_VOICE:-ru_RU-dmitri-medium}
+EN_VOICE=${EN_VOICE:-en_US-amy-medium}
+SPEED=${SPEED:-1.0}
 
 stop_current() {
   [ -f "$PIDFILE" ] || return 0
@@ -29,14 +37,17 @@ sys.stdout.write(t[:1500])')
 [ -z "$text" ] && exit 0
 
 case "$text" in
-  *[А-Яа-яЁё]*) MODEL=$VOICES/ru_RU-dmitri-medium.onnx ;;
-  *)            MODEL=$VOICES/en_US-amy-medium.onnx ;;
+  *[А-Яа-яЁё]*) MODEL=$VOICES/$RU_VOICE.onnx ;;
+  *)            MODEL=$VOICES/$EN_VOICE.onnx ;;
 esac
+# Fall back to whatever is actually installed rather than saying nothing.
+[ -f "$MODEL" ] || MODEL=$(ls "$VOICES"/*.onnx 2>/dev/null | head -1)
+[ -f "$MODEL" ] || exit 0
 
 stop_current
 mkdir -p "$BASE"
 printf '%s' "$text" \
-  | "$PY" -m piper -m "$MODEL" --output-raw 2>/dev/null \
+  | "$PY" -m piper -m "$MODEL" --length-scale "$(awk -v s="$SPEED" 'BEGIN{printf "%.2f", 1/s}')" --output-raw 2>/dev/null \
   | pw-play --rate 22050 --format s16 --channels 1 - >/dev/null 2>&1 &
 # record the whole pipeline so --stop can kill it
 jobs -p > "$PIDFILE"
