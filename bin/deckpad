@@ -1,0 +1,21 @@
+#!/usr/bin/python3
+"""Pad a raw audio stream with silence at both ends.
+
+pw-play starts before the audio is ready and stops the moment the pipe closes,
+which clipped the first and last syllable off short phrases - "слушаю" came out
+as an unintelligible blip. A quarter second of silence at each end fixes it for
+every phrase, not just the cues.
+"""
+import sys
+# Must be an even number of bytes: the stream is 16-bit, and an odd pad shifts
+# every sample after it by half a sample - which comes out as pure noise.
+PAD = b"\x00" * (2 * int(22050 * 0.25))   # quarter second, 16-bit mono
+out = sys.stdout.buffer
+out.write(PAD)
+while True:
+    chunk = sys.stdin.buffer.read(4096)
+    if not chunk:
+        break
+    out.write(chunk)
+out.write(PAD)
+out.flush()

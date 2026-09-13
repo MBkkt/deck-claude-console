@@ -1,0 +1,12 @@
+[Unit]
+Description=Claude companion for Game Mode (screenshot-triggered voice)
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/deckplay run
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

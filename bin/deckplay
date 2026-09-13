@@ -1,0 +1,248 @@
+#!/usr/bin/python3
+"""deckplay - talk to Claude from inside a game, without leaving it.
+
+In Game Mode there is no way to reach the console without switching away from
+what you are playing. This listens to the Deck's own buttons at the driver
+level - before the compositor or the game ever see them - and drives the Claude
+session running in tmux:
+
+The trigger is the screenshot key (STEAM + R1), because it is the only thing
+that reliably crosses from a game to us:
+
+  first screenshot    start dictation  (meta+k into the tmux pane)
+  second screenshot   stop, attach the picture, send
+
+Everything else was tried and does not work. Steam owns the pad over hidraw and
+puts it in a mode where evdev carries no button events at all, and keys mapped
+through Steam Input are injected into the compositor rather than through
+uinput - so neither the back buttons nor a mapped F13 can be seen from here.
+A screenshot, though, lands on disk, and a file is visible to anyone.
+
+The reply is spoken by the Stop hook, which already speaks in Game Mode only.
+
+  deckplay learn     press a button to record it as the ask button
+  deckplay run       run the listener (this is what the service does)
+  deckplay status    show what is configured and whether the session is there
+"""
+import os, sys, time, glob, json, subprocess, select
+
+HOME   = os.path.expanduser("~")
+STATE  = os.path.join(HOME, ".local/state/deckplay")
+CONF   = os.path.join(STATE, "config.json")
+SHOTS  = os.path.join(HOME, ".steam/steam/userdata")
+TMUX   = ["tmux", "-L", "deck"]
+PANE   = "claude"
+
+SHOT_FRESH_SEC = 180         # a picture older than this is not "what I mean"
+POLL_SEC       = 1.5         # how often to look for a new screenshot
+ARM_TIMEOUT    = 300         # stop waiting for the second screenshot after this
+
+
+def load():
+    try:
+        return json.load(open(CONF))
+    except (OSError, ValueError):
+        return {}
+
+
+def save(conf):
+    os.makedirs(STATE, exist_ok=True)
+    json.dump(conf, open(CONF, "w"), indent=2)
+
+
+def controllers(everything=False):
+    """Input devices worth listening to.
+
+    Steam reads the Deck's own controller over hidraw and puts it into a mode
+    where it emits no evdev button events at all, so watching the controller
+    device catches nothing. What does arrive is whatever Steam Input is
+    configured to *send* - a key from its virtual keyboard - so the listener
+    has to watch every device that carries keys, not just the pad.
+    """
+    import evdev
+    found = []
+    for path in evdev.list_devices():
+        try:
+            dev = evdev.InputDevice(path)
+        except OSError:
+            continue
+        keys = dev.capabilities().get(evdev.ecodes.EV_KEY, [])
+        wanted = ("steam" in dev.name.lower() or "controller" in dev.name.lower()
+                  or len(keys) > 40)
+        if everything or wanted:
+            found.append(dev)
+        else:
+            dev.close()
+    return found
+
+
+def latest_screenshot():
+    """Newest Steam screenshot, if it is recent enough to be what he means."""
+    shots = glob.glob(os.path.join(SHOTS, "*", "760", "remote", "*", "screenshots", "*.jpg"))
+    shots += glob.glob(os.path.join(SHOTS, "*", "760", "remote", "*", "screenshots", "*.png"))
+    if not shots:
+        return None
+    newest = max(shots, key=os.path.getmtime)
+    if time.time() - os.path.getmtime(newest) > SHOT_FRESH_SEC:
+        return None
+    return newest
+
+
+def beep(rising=True):
+    """Say a short word instead of playing a tone.
+
+    Synthesised tones through pw-play were inaudible to him twice, while
+    spoken replies come through fine - so the cue uses the exact same path
+    that already works, and nothing clever.
+    """
+    word = "слушаю" if rising else "принял"
+    try:
+        subprocess.run([os.path.join(HOME, ".local/bin/decksay"), word],
+                       capture_output=True, timeout=20)
+    except (subprocess.SubprocessError, OSError):
+        pass
+
+
+def tmux_send(*keys):
+    subprocess.run(TMUX + ["send-keys", "-t", PANE, *keys], capture_output=True)
+
+
+def session_alive():
+    r = subprocess.run(TMUX + ["has-session", "-t", PANE], capture_output=True)
+    return r.returncode == 0
+
+
+def start_dictation():
+    beep(rising=True)          # spoken before the microphone opens, so the
+    time.sleep(0.3)            # cue itself is never transcribed
+    tmux_send("M-k")
+
+
+def prompt_line():
+    """The input line as it looks right now, read out of the tmux pane."""
+    r = subprocess.run(TMUX + ["capture-pane", "-p", "-t", PANE],
+                       capture_output=True, text=True)
+    line = ""
+    for raw in r.stdout.splitlines():
+        t = raw.strip()
+        if t.startswith("\u276f"):
+            line = t[1:].strip()
+    return line
+
+
+def wait_for_transcription(limit=25.0):
+    """Wait until the dictation has actually turned into text.
+
+    Guessing a fixed delay sent the message before the words arrived - the
+    question went out as a bare screenshot. Speech takes as long as it takes,
+    so watch the prompt instead: the meter (a lone block) means it is still
+    working, an empty prompt means nothing was heard.
+    """
+    deadline = time.time() + limit
+    while time.time() < deadline:
+        line = prompt_line()
+        if line and "\u2581" not in line and not line.startswith('Try "'):
+            time.sleep(0.6)              # let the last words settle
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def stop_and_send(shot=None):
+    """Stop dictating, then submit - with the screenshot path if there is one."""
+    tmux_send("M-k")
+    beep(rising=False)
+    got_text = wait_for_transcription()
+    if not got_text:
+        print("речь не распозналась - отправляю только снимок", flush=True)
+    shot = shot or latest_screenshot()
+    if shot:
+        # Typed after the dictation, so the question keeps its own wording and
+        # the picture is simply attached to it.
+        tmux_send("-l", " (посмотри снимок экрана: %s)" % shot)
+        time.sleep(0.3)
+    tmux_send("Enter")
+
+
+def cmd_learn():
+    import evdev
+    devs = controllers(everything=True)
+    if not devs:
+        sys.exit("Контроллер не найден. В Game Mode он есть всегда; на рабочем "
+                 "столе - только если Deck не спит.")
+    sys.stdout.reconfigure(line_buffering=True)
+    print("Слушаю %d устройств. Нажми то, что хочешь назначить." % len(devs))
+    for d in devs:
+        print("   %s  %s" % (d.path, d.name))
+    fds = {d.fd: d for d in devs}
+    while True:
+        r, _, _ = select.select(fds, [], [], 900)
+        if not r:
+            sys.exit("Ничего не нажато за 15 минут.")
+        for fd in r:
+            for ev in fds[fd].read():
+                if ev.type == evdev.ecodes.EV_KEY and ev.value == 1:
+                    name = evdev.ecodes.KEY.get(ev.code) or evdev.ecodes.BTN.get(ev.code)
+                    conf = load()
+                    conf["ask_device"] = fds[fd].path
+                    conf["ask_code"] = ev.code
+                    conf["ask_name"] = str(name)
+                    save(conf)
+                    print("Записал: код %d (%s) с устройства %s"
+                          % (ev.code, name, fds[fd].path))
+                    return
+
+
+def all_shots():
+    pats = (os.path.join(SHOTS, "*", "760", "remote", "*", "screenshots", "*.jpg"),
+            os.path.join(SHOTS, "*", "760", "remote", "*", "screenshots", "*.png"))
+    out = []
+    for p in pats:
+        out += glob.glob(p)
+    return set(out)
+
+
+def cmd_run():
+    """Watch for screenshots and drive the session with them."""
+    seen = all_shots()
+    listening = False
+    armed_at = 0.0
+    print("deckplay следит за скриншотами Steam", flush=True)
+    while True:
+        time.sleep(POLL_SEC)
+        now = all_shots()
+        fresh = sorted(now - seen, key=os.path.getmtime) if now - seen else []
+        seen = now
+        if listening and time.time() - armed_at > ARM_TIMEOUT:
+            listening = False            # he walked away; do not send anything
+            print("ожидание сброшено", flush=True)
+        if not fresh:
+            continue
+        if not session_alive():
+            print("сессия claude не найдена", flush=True)
+            continue
+        if listening:
+            stop_and_send(fresh[-1])
+            listening = False
+            print("вопрос отправлен со снимком %s" % fresh[-1], flush=True)
+        else:
+            start_dictation()
+            listening = True
+            armed_at = time.time()
+            print("слушаю (снимок %s)" % fresh[-1], flush=True)
+
+
+def cmd_status():
+    conf = load()
+    print("кнопка:   %s (код %s)" % (conf.get("ask_name", "не настроена"),
+                                     conf.get("ask_code", "-")))
+    print("сессия:   %s" % ("есть" if session_alive() else "нет"))
+    devs = controllers()
+    print("контроллер: %s" % (", ".join(d.path for d in devs) or "не найден"))
+    shot = latest_screenshot()
+    print("свежий снимок: %s" % (shot or "нет"))
+
+
+if __name__ == "__main__":
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
+    {"learn": cmd_learn, "run": cmd_run, "status": cmd_status}.get(cmd, cmd_status)()
