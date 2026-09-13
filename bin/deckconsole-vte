@@ -389,6 +389,12 @@ class Console(Gtk.Application):
         scroller.set_min_content_width(560)
         scroller.set_child(menu_box)
         menu.set_child(scroller)
+        # Not autohide: an autohiding popover grabs the input focus, and giving
+        # it back to the terminal afterwards reads to KWin as "text input has
+        # started here", which pops the on-screen keyboard up every time the
+        # menu is opened. Without the grab the focus never leaves the terminal;
+        # the button below closes the menu instead of a click-outside.
+        menu.set_autohide(False)
         def place(item):
             menu_box.attach(item, menu_box.slot % 3, menu_box.slot // 3, 1, 1)
             menu_box.slot += 1
@@ -440,7 +446,9 @@ class Console(Gtk.Application):
         cmd_btn.set_size_request(110, -1)
         menu.set_parent(cmd_btn)
         menu.set_position(Gtk.PositionType.TOP)
-        cmd_btn.connect("clicked", lambda *_a: menu.popup())
+        cmd_btn.connect("clicked",
+                        lambda *_a: menu.popdown() if menu.get_visible()
+                        else menu.popup())
         made["cmd"] = cmd_btn
 
         # His order, left to right: the rarely-pressed things first, and the

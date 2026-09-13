@@ -74,7 +74,16 @@ case "$1" in
     else new=$2; fi
     set_key SPEED "$new"; echo "speed: $new" ;;
   say)  shift; "$HOME/.local/bin/decksay" "$*" ;;
-  test) "$HOME/.local/bin/decksay" "Проверка голоса. Так я буду звучать по-русски." ;;
+  test)
+    # Long enough to judge by, and it says whose voice it is, so cycling
+    # through them and listening is a single button press each time.
+    . "$CONF"
+    "$HOME/.local/bin/decksay" "Говорит $("$0" show voice). \
+Так я буду читать ответы вслух, когда экран смотреть некогда. \
+Проверим, как звучат числа: двадцать три, сто сорок семь, две тысячи двадцать шесть. \
+И как звучит длинная фраза с придаточным предложением, в которой голос успевает показать \
+интонацию, паузы и то, как он справляется с ударениями в незнакомых словах. \
+Скорость сейчас ${SPEED:-1.0}. Если этот голос не нравится, нажми Voice ещё раз." ;;
   stop) "$HOME/.local/bin/decksay" --stop ;;
   *)
     . "$CONF"
