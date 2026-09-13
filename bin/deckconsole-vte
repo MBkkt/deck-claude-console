@@ -275,7 +275,7 @@ class Console(Gtk.Application):
         return btn
 
     def do_activate(self):
-        win = Gtk.ApplicationWindow(application=self, title="Claude Console")
+        win = Gtk.ApplicationWindow(application=self, title="Deck Claude Console")
         geo = os.environ.get("DECK_CONSOLE_GEOMETRY", "1280x800")
         try:
             w, h = (int(v) for v in geo.lower().split("x")[:2])

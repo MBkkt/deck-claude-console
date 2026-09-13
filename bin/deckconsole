@@ -55,7 +55,7 @@ GAME_MODE = bool(os.environ.get("GAMESCOPE_WAYLAND_DISPLAY")) or \
     subprocess.run(["pgrep", "-f", "gamescope-session"], capture_output=True).returncode == 0
 
 root = tk.Tk()
-root.title("Claude Console")
+root.title("Deck Claude Console")
 root.configure(bg=BG)
 root.geometry(os.environ.get("DECK_CONSOLE_GEOMETRY", "1280x800+0+0"))
 if GAME_MODE and not os.environ.get("DECK_CONSOLE_GEOMETRY"):
