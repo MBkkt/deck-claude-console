@@ -124,6 +124,7 @@ class Console(Gtk.Application):
         self.scroll_speed = 1.0
         self.voice_btn = None
         self.settings_items = []
+        self.kb_on = False
 
     # ---- writing to the terminal -------------------------------------------
     def feed(self, data):
@@ -197,6 +198,29 @@ class Console(Gtk.Application):
             except (subprocess.SubprocessError, OSError):
                 value = ""
             item.set_label("%s: %s" % (title, value or "?"))
+
+    def keyboard(self, on):
+        """Turn KWin's on-screen keyboard on or off.
+
+        Unfocusing the terminal was not enough: the window still announces that
+        it takes text, and KWin slides the keyboard up on its own. So the
+        keyboard is switched off outright while this console is open, and the
+        ⌨ button is the only thing that brings it back. It is a compositor-wide
+        setting, so it is restored when the window closes - the browser should
+        keep behaving as it did.
+        """
+        subprocess.run(["gdbus", "call", "--session", "--dest", "org.kde.KWin",
+                        "--object-path", "/VirtualKeyboard", "--method",
+                        "org.freedesktop.DBus.Properties.Set",
+                        "org.kde.kwin.VirtualKeyboard", "active",
+                        "<%s>" % ("true" if on else "false")],
+                       capture_output=True)
+        self.kb_on = on
+
+    def keyboard_toggle(self, *_a):
+        self.keyboard(not self.kb_on)
+        if self.kb_on and self.term:
+            self.term.grab_focus()      # the request is what makes it appear
 
     def run_tool(self, argv):
         """Fire off a helper script without blocking the interface."""
@@ -284,7 +308,7 @@ class Console(Gtk.Application):
         win.set_default_size(w, h)
         # Half the screen is the useful floor: narrower and the buttons start
         # fighting each other for room, and a terminal that thin is unreadable.
-        win.set_size_request(624, 320)
+        win.set_size_request(640, 320)
         # In Game Mode there is no window manager to maximise us.
         if not os.environ.get("DECK_CONSOLE_GEOMETRY") and (
                 os.environ.get("GAMESCOPE_WAYLAND_DISPLAY")
@@ -305,6 +329,7 @@ class Console(Gtk.Application):
         fg.parse(FG); bg.parse(BG)
         self.term.set_colors(fg, bg, None)
         self.term.connect("child-exited", lambda *_a: win.close())
+        win.connect("close-request", lambda *_a: (self.keyboard(True), False)[1])
         # Selecting already means "I want this" - put it straight into the
         # clipboard so there is nothing to press afterwards.
         self.term.connect("selection-changed",
@@ -324,7 +349,7 @@ class Console(Gtk.Application):
         voice.add_css_class("voice")
         # Fixed: a button that resizes when its label changes is unsettling to
         # aim at, and this one changes label three times a sentence.
-        voice.set_size_request(200, -1)
+        voice.set_size_request(165, -1)
         voice_gesture = Gtk.GestureClick()
         voice_gesture.connect("pressed",  self.voice_press)
         voice_gesture.connect("released", self.voice_release)
@@ -451,6 +476,13 @@ class Console(Gtk.Application):
                         else menu.popup())
         made["cmd"] = cmd_btn
 
+        kb_btn = Gtk.Button(label="⌨")
+        kb_btn.set_can_focus(False)
+        kb_btn.set_size_request(52, -1)
+        kb_btn.add_css_class("slate")
+        kb_btn.connect("clicked", self.keyboard_toggle)
+        made["kbd"] = kb_btn
+
         # His order, left to right: the rarely-pressed things first, and the
         # two he reaches for straight after speaking at the far end, under the
         # thumb that is already there.
@@ -459,7 +491,7 @@ class Console(Gtk.Application):
             if isinstance(child, Gtk.Label):          # setting its floor
                 child.set_ellipsize(Pango.EllipsizeMode.END)
 
-        for key in ("cmd", "gap", "▼", "▲", "📋 Paste", "word", "voice"):
+        for key in ("cmd", "kbd", "gap", "▼", "▲", "📋 Paste", "word", "voice"):
             if key == "gap":
                 spacer = Gtk.Box()
                 spacer.set_hexpand(True)         # the slack lives here, not in
@@ -511,12 +543,12 @@ class Console(Gtk.Application):
                               None, None, None)
 
         win.present()
-        # Deliberately no grab_focus here: focusing the terminal announces "text
-        # is being entered", and KWin answers that by sliding the on-screen
-        # keyboard up over a window that was opened to be read. The buttons
-        # write to the pty directly and need no focus; tapping the terminal
-        # gives it focus - and the keyboard - when that is actually wanted.
-        win.set_focus(None)
+        # The terminal keeps the focus: the Deck's A button sends a real Enter
+        # keystroke, and a window with nothing focused has nowhere to put it.
+        # The on-screen keyboard is kept away by switching it off in KWin
+        # instead - see keyboard() - so focus and keyboard stay separate.
+        self.term.grab_focus()
+        self.keyboard(False)
 
 
 if __name__ == "__main__":
