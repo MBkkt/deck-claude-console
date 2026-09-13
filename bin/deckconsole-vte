@@ -449,8 +449,13 @@ class Console(Gtk.Application):
             item = Gtk.Button(label=title)
             item.set_can_focus(False)
             item.add_css_class("run")
-            item.connect("clicked",
-                         lambda _b, a=argv: (menu.popdown(), self.run_tool(a)))
+            # These stay open on purpose: picking a voice means listening to it
+            # and picking again, and a menu that shuts after every press turns
+            # that into three taps per try.
+            item.connect("clicked", lambda _b, a=argv: (
+                self.run_tool(a),
+                GLib.timeout_add(300, lambda: (self.refresh_settings(),
+                                               False)[1])))
             if probe:
                 self.settings_items.append((item, title, probe))
             place(item)
