@@ -511,7 +511,12 @@ class Console(Gtk.Application):
                               None, None, None)
 
         win.present()
-        self.term.grab_focus()
+        # Deliberately no grab_focus here: focusing the terminal announces "text
+        # is being entered", and KWin answers that by sliding the on-screen
+        # keyboard up over a window that was opened to be read. The buttons
+        # write to the pty directly and need no focus; tapping the terminal
+        # gives it focus - and the keyboard - when that is actually wanted.
+        win.set_focus(None)
 
 
 if __name__ == "__main__":
