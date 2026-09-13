@@ -1,0 +1,20 @@
+#!/bin/bash
+# deckkbd [on|off|toggle] - KDE's on-screen keyboard, off by default.
+#
+# KWin's VirtualKeyboardMode: 0 = never, 1 = when an application asks,
+# 2 = always. Left at 1 the keyboard barges in whenever anything takes text
+# input - opening a terminal, closing a menu - so 0 is the resting state and
+# this script is how it is summoned.
+OBJ=(--session --dest org.kde.KWin --object-path /VirtualKeyboard)
+IFACE=org.kde.kwin.VirtualKeyboard
+
+get() { gdbus call "${OBJ[@]}" --method org.freedesktop.DBus.Properties.Get "$IFACE" mode 2>/dev/null \
+        | grep -o '[0-9]\+' | head -1; }
+set_mode() { gdbus call "${OBJ[@]}" --method org.freedesktop.DBus.Properties.Set "$IFACE" mode \
+             "<int32 $1>" >/dev/null 2>&1; }
+
+case "${1:-toggle}" in
+  on)   set_mode 1; echo on ;;
+  off)  set_mode 0; echo off ;;
+  *)    [ "$(get)" = "0" ] && { set_mode 1; echo on; } || { set_mode 0; echo off; } ;;
+esac

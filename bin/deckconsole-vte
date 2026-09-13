@@ -200,21 +200,14 @@ class Console(Gtk.Application):
             item.set_label("%s: %s" % (title, value or "?"))
 
     def keyboard(self, on):
-        """Turn KWin's on-screen keyboard on or off.
+        """KDE's on-screen keyboard, which stays off unless asked for.
 
-        Unfocusing the terminal was not enough: the window still announces that
-        it takes text, and KWin slides the keyboard up on its own. So the
-        keyboard is switched off outright while this console is open, and the
-        ⌨ button is the only thing that brings it back. It is a compositor-wide
-        setting, so it is restored when the window closes - the browser should
-        keep behaving as it did.
+        KWin's VirtualKeyboardMode is 0 here - never - so nothing can summon it
+        by accident: not opening this window, not closing a menu, not the
+        terminal taking focus. The ⌨ button is what turns it on, and turning it
+        off again is either that button or the keyboard's own hide key.
         """
-        subprocess.run(["gdbus", "call", "--session", "--dest", "org.kde.KWin",
-                        "--object-path", "/VirtualKeyboard", "--method",
-                        "org.freedesktop.DBus.Properties.Set",
-                        "org.kde.kwin.VirtualKeyboard", "active",
-                        "<%s>" % ("true" if on else "false")],
-                       capture_output=True)
+        subprocess.run(["deckkbd", "on" if on else "off"], capture_output=True)
         self.kb_on = on
 
     def keyboard_toggle(self, *_a):
@@ -329,7 +322,6 @@ class Console(Gtk.Application):
         fg.parse(FG); bg.parse(BG)
         self.term.set_colors(fg, bg, None)
         self.term.connect("child-exited", lambda *_a: win.close())
-        win.connect("close-request", lambda *_a: (self.keyboard(True), False)[1])
         # Selecting already means "I want this" - put it straight into the
         # clipboard so there is nothing to press afterwards.
         self.term.connect("selection-changed",
